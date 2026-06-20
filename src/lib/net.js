@@ -1,17 +1,38 @@
-// net.js — tiny P2P transport over PeerJS (public broker, no server of ours).
+// net.js — P2P transport for the coloring duel.
 //
-// One side hosts under a short room code, the other joins by typing it. The
-// only non-trivial bit is chunking: the coloring-page PNG can be a few hundred
-// KB, which is unreliable to push through a single WebRTC datachannel message
-// (Safari in particular). So we split big JSON payloads into ~48KB string
-// chunks and reassemble them on the far side, transparently.
+// Uses Trystero (nostr strategy) for signalling: peers find each other through
+// public Nostr relays by a shared room code — no server of ours, and far more
+// reliable than the public PeerJS broker. WebRTC is hardened with STUN + free
+// TURN so two laptops on *different* networks (behind NAT) can still connect;
+// without TURN, cross-network WebRTC often silently fails.
+//
+// Public API matches what App.jsx expects:
+//   net.host(code) / net.join(code) / net.on(ev, fn) / net.send(obj) / net.destroy()
+// Events: 'open' (peer connected), 'message' (obj), 'close' (peer left).
 
-import Peer from 'peerjs'
+import { joinRoom } from 'trystero/nostr'
 
-const PREFIX = 'colorduel-v1-'
-// No ambiguous characters (0/O, 1/I) so a code is easy to read out loud.
+const APP_ID = 'colorduel-v1'
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-const CHUNK = 48 * 1024
+
+// STUN discovers your public address; TURN relays media when a direct path is
+// blocked by NAT/firewall. Open Relay (metered.ca) is a free public TURN.
+const TURN_SERVERS = [
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443',
+      'turns:openrelay.metered.ca:443?transport=tcp',
+    ],
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+]
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  ...TURN_SERVERS,
+]
 
 export function makeRoomCode() {
   let s = ''
@@ -25,10 +46,10 @@ export function normalizeCode(input) {
 
 export class Net {
   constructor() {
-    this.peer = null
-    this.conn = null
+    this.room = null
+    this.action = null
+    this.peerId = null
     this.handlers = {}
-    this._rx = new Map()
     this.destroyed = false
   }
 
@@ -41,86 +62,51 @@ export class Net {
     this.handlers[event]?.(...args)
   }
 
-  host(code) {
-    this.peer = new Peer(PREFIX + code, { debug: 1 })
-    this.peer.on('open', () => this._emit('status', 'waiting'))
-    this.peer.on('connection', (conn) => this._setupConn(conn))
-    this.peer.on('error', (e) => this._emit('error', e))
-  }
-
-  join(code) {
-    this.peer = new Peer({ debug: 1 })
-    this.peer.on('open', () => {
-      const conn = this.peer.connect(PREFIX + code, { reliable: true })
-      this._setupConn(conn)
-    })
-    this.peer.on('error', (e) => this._emit('error', e))
-  }
-
-  _setupConn(conn) {
-    this.conn = conn
-    conn.on('open', () => this._emit('open'))
-    conn.on('data', (raw) => this._onRaw(raw))
-    conn.on('close', () => this._emit('close'))
-    conn.on('error', (e) => this._emit('error', e))
-  }
-
-  send(obj) {
-    if (!this.conn || !this.conn.open) return false
-    const s = JSON.stringify(obj)
-    if (s.length <= CHUNK) {
-      this.conn.send({ k: 'm', s })
-      return true
-    }
-    const id = Math.random().toString(36).slice(2)
-    const total = Math.ceil(s.length / CHUNK)
-    for (let i = 0; i < total; i++) {
-      this.conn.send({ k: 'c', id, i, total, s: s.slice(i * CHUNK, (i + 1) * CHUNK) })
-    }
-    return true
-  }
-
-  _onRaw(raw) {
-    if (!raw || typeof raw !== 'object') return
-    if (raw.k === 'm') {
-      this._deliver(raw.s)
+  _open(code) {
+    try {
+      this.room = joinRoom(
+        { appId: APP_ID, rtcConfig: { iceServers: ICE_SERVERS }, turnConfig: TURN_SERVERS },
+        code,
+      )
+    } catch (e) {
+      this._emit('error', e)
       return
     }
-    if (raw.k === 'c') {
-      let buf = this._rx.get(raw.id)
-      if (!buf) { buf = { parts: new Array(raw.total), got: 0 }; this._rx.set(raw.id, buf) }
-      if (buf.parts[raw.i] === undefined) { buf.parts[raw.i] = raw.s; buf.got++ }
-      if (buf.got === raw.total) {
-        this._rx.delete(raw.id)
-        this._deliver(buf.parts.join(''))
-      }
-    }
+    const action = this.room.makeAction('m')
+    action.onMessage = (data) => this._emit('message', data)
+    this.action = action
+    this.room.onPeerJoin = (id) => { this.peerId = id; this._emit('open') }
+    this.room.onPeerLeave = () => { this.peerId = null; this._emit('close') }
   }
 
-  _deliver(jsonString) {
-    let obj
-    try { obj = JSON.parse(jsonString) } catch { return }
-    this._emit('message', obj)
+  // host and guest both just join the same room; roles are decided app-side.
+  host(code) { this._open(code) }
+  join(code) { this._open(code) }
+
+  send(obj) {
+    if (!this.action) return false
+    try {
+      // Trystero auto-chunks large payloads (the coloring-page PNG) for us.
+      this.action.send(obj)
+      return true
+    } catch {
+      return false
+    }
   }
 
   get connected() {
-    return !!(this.conn && this.conn.open)
+    return !!this.peerId
   }
 
   destroy() {
     this.destroyed = true
-    try { this.conn?.close() } catch { /* ignore */ }
-    try { this.peer?.destroy() } catch { /* ignore */ }
+    try { this.room?.leave() } catch { /* ignore */ }
+    this.room = null
+    this.action = null
+    this.peerId = null
   }
 }
 
-// Friendly Russian text for the PeerJS error types we actually hit.
-export function describeError(err) {
-  const t = err?.type
-  if (t === 'unavailable-id') return 'Код комнаты уже занят — создай новую комнату.'
-  if (t === 'peer-unavailable') return 'Комната не найдена. Проверь код — возможно, хост ещё не создал её.'
-  if (t === 'network' || t === 'server-error') return 'Проблема с сетью/брокером. Проверь интернет и попробуй ещё раз.'
-  if (t === 'browser-incompatible') return 'Браузер не поддерживает WebRTC.'
-  if (t === 'disconnected') return 'Соединение с брокером потеряно.'
-  return 'Не удалось установить соединение: ' + (t || 'неизвестная ошибка') + '.'
+export function describeError() {
+  return 'Не удалось установить соединение. Проверьте интернет и попробуйте пересоздать комнату.'
 }

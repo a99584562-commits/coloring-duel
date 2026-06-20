@@ -31,6 +31,7 @@ function randomFill(page, density, seed = 0) {
 export default function App() {
   const netRef = useRef(null)
   const screenRef = useRef('lobby')
+  const connectTimerRef = useRef(null)
 
   const [screen, setScreen] = useState('lobby')
   const [role, setRole] = useState(null)
@@ -90,6 +91,7 @@ export default function App() {
 
   function attachHandlers(net, asRole) {
     net.on('open', () => {
+      clearTimeout(connectTimerRef.current)
       setBusy(false)
       setError('')
       setScreen(asRole === 'host' ? 'upload' : 'wait-image')
@@ -138,6 +140,7 @@ export default function App() {
     attachHandlers(net, 'host')
     net.host(code)
     setScreen('host-wait')
+    armConnectTimeout()
   }
 
   function startGuest(code) {
@@ -152,9 +155,18 @@ export default function App() {
     attachHandlers(net, 'guest')
     net.join(c)
     setScreen('connecting')
+    armConnectTimeout()
+  }
+
+  function armConnectTimeout() {
+    clearTimeout(connectTimerRef.current)
+    connectTimerRef.current = setTimeout(() => {
+      setError('Долго не подключается. Проверьте, что у обоих один код и есть интернет — или пересоздайте комнату. Связь идёт через публичные релеи, иногда нужно 10–20 секунд.')
+    }, 20000)
   }
 
   function goLobby() {
+    clearTimeout(connectTimerRef.current)
     try { netRef.current?.destroy() } catch { /* ignore */ }
     netRef.current = null
     setRole(null)
@@ -230,6 +242,7 @@ export default function App() {
         onShare={shareLink}
       >
         {copied && <p className="text-xs font-medium text-violet">Ссылка скопирована ✓</p>}
+        {error && <p className="max-w-xs rounded-2xl bg-pink/10 px-4 py-2.5 text-center text-xs font-medium text-[#b3245f] ring-1 ring-pink/20">{error}</p>}
         <button onClick={goLobby} className="text-sm font-medium text-mute transition-colors hover:text-ink">
           Отмена
         </button>
@@ -239,6 +252,7 @@ export default function App() {
   if (screen === 'connecting') {
     return (
       <Waiting title={`Подключаюсь к ${roomCode}…`} subtitle="Устанавливаем прямое соединение между устройствами.">
+        {error && <p className="max-w-xs rounded-2xl bg-pink/10 px-4 py-2.5 text-center text-xs font-medium text-[#b3245f] ring-1 ring-pink/20">{error}</p>}
         <button onClick={goLobby} className="text-sm font-medium text-mute transition-colors hover:text-ink">
           Отмена
         </button>
