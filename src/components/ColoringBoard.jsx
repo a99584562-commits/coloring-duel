@@ -51,7 +51,7 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
 
   const [tool, setTool] = useState('fill')
   const [shape, setShape] = useState('circle')
-  const [brushSize, setBrushSize] = useState(12)
+  const [brushSize, setBrushSize] = useState(10) // diameter in px (1 = single pixel)
   const [selected, setSelected] = useState(PALETTE[10])
   const [lastHex, setLastHex] = useState(packedToHex(PALETTE[10]))
   const [filled, setFilled] = useState(0)
@@ -166,22 +166,23 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   }
 
   function stampStroke(x0, y0, x1, y1, value) {
-    const r = brushSize
+    const r = brushSize / 2          // brushSize is the diameter in px
+    const R = Math.ceil(r)           // integer loop bounds
     const w = page.width, h = page.height
     const brush = brushRef.current
     const stroke = strokeRef.current
     const dx = x1 - x0, dy = y1 - y0
     const dist = Math.hypot(dx, dy)
-    const steps = Math.max(1, Math.round(dist / Math.max(1, r / 2)))
+    const steps = Math.max(1, Math.round(dist / Math.max(1, r)))
     const px = []
     let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9
     for (let s = 0; s <= steps; s++) {
       const t = steps === 0 ? 0 : s / steps
       const cx = Math.round(x0 + dx * t), cy = Math.round(y0 + dy * t)
-      for (let oy = -r; oy <= r; oy++) {
+      for (let oy = -R; oy <= R; oy++) {
         const y = cy + oy
         if (y < 0 || y >= h) continue
-        for (let ox = -r; ox <= r; ox++) {
+        for (let ox = -R; ox <= R; ox++) {
           const x = cx + ox
           if (x < 0 || x >= w) continue
           if (!inShape(shape, ox, oy, r)) continue
@@ -335,6 +336,11 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
     pickColor(packRGB(d[i], d[i + 1], d[i + 2]))
   }
 
+  function setSize(v) {
+    if (Number.isNaN(v)) return
+    setBrushSize(Math.max(1, Math.min(120, Math.round(v))))
+  }
+
   function finish() {
     if (done) return
     setDone(true)
@@ -374,7 +380,7 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const cursor = grabbing ? 'grabbing' : peeking ? 'default' : spaceRef.current ? 'grab' : 'crosshair'
   const brushTool = tool === 'brush' || tool === 'eraser'
   const cursorScale = page.width ? (fit.w / page.width) * z : 1
-  const cursorDia = Math.max(8, 2 * brushSize * cursorScale)
+  const cursorDia = Math.max(6, brushSize * cursorScale)
   const showCursor = brushTool && hover && !grabbing && !peeking
 
   return (
@@ -452,11 +458,34 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
                     ))}
                   </div>
                   <div>
-                    <div className="mb-1.5 flex items-baseline justify-between">
+                    <div className="mb-2 flex items-center justify-between">
                       <span className="text-xs font-semibold text-ink-soft">Размер кисти</span>
-                      <span className="font-display text-sm font-semibold text-violet">{brushSize * 2}px</span>
+                      <div className="flex items-center gap-1">
+                        <Stepper onClick={() => setSize(brushSize - 1)}>−</Stepper>
+                        <input
+                          type="number"
+                          min={1}
+                          max={120}
+                          value={brushSize}
+                          onChange={(e) => setSize(Number(e.target.value))}
+                          className="w-11 rounded-lg bg-ink/5 px-1 py-1 text-center font-display text-sm font-semibold text-ink focus:outline-none focus:ring-2 focus:ring-violet/40"
+                        />
+                        <Stepper onClick={() => setSize(brushSize + 1)}>+</Stepper>
+                        <span className="text-xs text-mute">px</span>
+                      </div>
                     </div>
-                    <input type="range" min={2} max={70} value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} className="duel-range w-full" />
+                    <input type="range" min={1} max={120} value={brushSize} onChange={(e) => setSize(Number(e.target.value))} className="duel-range w-full" />
+                    <div className="mt-2 flex gap-1.5">
+                      {[1, 5, 10, 20, 40, 70].map((s) => (
+                        <button
+                          key={s}
+                          onClick={() => setSize(s)}
+                          className={`flex-1 rounded-lg py-1 text-xs font-semibold transition-colors ${brushSize === s ? 'bg-ink text-white' : 'bg-ink/5 text-ink-soft hover:bg-ink/10'}`}
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
@@ -550,6 +579,14 @@ function SmallBtn({ children, icon, ...rest }) {
 function ZoomBtn({ children, onClick }) {
   return (
     <button onClick={onClick} className="flex h-7 w-7 items-center justify-center rounded-full text-lg font-semibold text-ink-soft transition-colors hover:bg-ink/10 hover:text-ink">
+      {children}
+    </button>
+  )
+}
+
+function Stepper({ children, onClick }) {
+  return (
+    <button onClick={onClick} className="flex h-7 w-7 items-center justify-center rounded-lg bg-ink/5 text-base font-semibold leading-none text-ink-soft transition-colors hover:bg-ink/10">
       {children}
     </button>
   )
