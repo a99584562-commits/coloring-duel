@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Panel, Button, Eyebrow, Check, Undo, Eye } from './ui'
 import {
   renderBoard, paintPixels, renderOriginal,
-  packedToHex, hexToPacked, BRUSH_ERASE,
+  packedToHex, hexToPacked, packRGB, BRUSH_ERASE,
 } from '../lib/colorize'
 
 const PALETTE = [
@@ -47,6 +47,7 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const lastXYRef = useRef(null)
   const peekRef = useRef(false)
   const spaceRef = useRef(false)
+  const returnToolRef = useRef('fill') // tool to restore after a one-shot eyedropper pick
 
   const [tool, setTool] = useState('fill')
   const [shape, setShape] = useState('circle')
@@ -106,7 +107,13 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
       e.preventDefault()
       const rect = el.getBoundingClientRect()
       const mx = e.clientX - rect.left, my = e.clientY - rect.top
-      const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18
+      // gentle zoom: scale by scroll amount but cap each event to ±8% so it
+      // ramps smoothly instead of snapping to max on a laptop trackpad/wheel
+      let dy = e.deltaY
+      if (e.deltaMode === 1) dy *= 16 // lines → ~pixels
+      else if (e.deltaMode === 2) dy *= 400 // pages → ~pixels
+      let factor = Math.exp(-dy * 0.0012)
+      factor = Math.max(0.92, Math.min(1.08, factor))
       zoomAround(mx, my, factor)
     }
     el.addEventListener('wheel', onWheel, { passive: false })
@@ -210,9 +217,10 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
       return
     }
     if (peekRef.current || e.button !== 0) return
+    const { x, y } = canvasXY(e)
+    if (tool === 'pick') { sampleColorAt(x, y); return }
     try { containerRef.current.setPointerCapture(e.pointerId) } catch { /* ignore */ }
     paintingRef.current = true
-    const { x, y } = canvasXY(e)
     if (tool === 'fill') {
       const region = page.regionMap[y * page.width + x]
       lastRegionRef.current = region
@@ -311,7 +319,20 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   function pickColor(packed) {
     setSelected(packed)
     setLastHex(packedToHex(packed))
-    if (tool === 'eraser') setTool('brush')
+    // eyedropper is one-shot → go back to painting; eraser → switch to brush
+    if (tool === 'pick') setTool(returnToolRef.current || 'brush')
+    else if (tool === 'eraser') setTool('brush')
+  }
+
+  function chooseTool(t) {
+    if (t === 'pick' && tool !== 'pick') returnToolRef.current = tool
+    setTool(t)
+  }
+
+  function sampleColorAt(x, y) {
+    const d = workingRef.current.data
+    const i = (y * page.width + x) * 4
+    pickColor(packRGB(d[i], d[i + 1], d[i + 2]))
   }
 
   function finish() {
@@ -327,9 +348,10 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
       if (e.code === 'Space') { e.preventDefault(); spaceRef.current = true; setGrabbing(true); return }
       if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); undo(); return }
       if (e.key === 'z' || e.key === 'Z') { undo(); return }
-      if (e.key === 'b' || e.key === 'B') { setTool('brush'); return }
-      if (e.key === 'g' || e.key === 'G') { setTool('fill'); return }
-      if (e.key === 'e' || e.key === 'E') { setTool('eraser'); return }
+      if (e.key === 'b' || e.key === 'B') { chooseTool('brush'); return }
+      if (e.key === 'g' || e.key === 'G') { chooseTool('fill'); return }
+      if (e.key === 'e' || e.key === 'E') { chooseTool('eraser'); return }
+      if (e.key === 'i' || e.key === 'I') { chooseTool('pick'); return }
       if (e.key === '+' || e.key === '=') { zoomButton(1.2); return }
       if (e.key === '-' || e.key === '_') { zoomButton(1 / 1.2); return }
       if (e.key === 'Enter') { e.preventDefault(); finish(); return }
@@ -367,7 +389,7 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
           )}
         </div>
         <p className="hidden text-xs text-mute lg:block">
-          <Kbd>G</Kbd> заливка · <Kbd>B</Kbd> кисть · <Kbd>E</Kbd> ластик · <Kbd>Z</Kbd> отмена · <Kbd>Пробел</Kbd> двигать · <Kbd>колесо</Kbd> зум
+          <Kbd>G</Kbd> заливка · <Kbd>B</Kbd> кисть · <Kbd>I</Kbd> пипетка · <Kbd>E</Kbd> ластик · <Kbd>Z</Kbd> отмена · <Kbd>Пробел</Kbd> двигать
         </p>
       </div>
 
@@ -409,10 +431,11 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
           {/* tools */}
           <Panel>
             <div className="p-4">
-              <div className="grid grid-cols-3 gap-2">
-                <ToolBtn active={tool === 'fill'} onClick={() => setTool('fill')} icon={<FillIco />} label="Заливка" />
-                <ToolBtn active={tool === 'brush'} onClick={() => setTool('brush')} icon={<BrushIco />} label="Кисть" />
-                <ToolBtn active={tool === 'eraser'} onClick={() => setTool('eraser')} icon={<EraseIco />} label="Ластик" />
+              <div className="grid grid-cols-4 gap-2">
+                <ToolBtn active={tool === 'fill'} onClick={() => chooseTool('fill')} icon={<FillIco />} label="Заливка" />
+                <ToolBtn active={tool === 'brush'} onClick={() => chooseTool('brush')} icon={<BrushIco />} label="Кисть" />
+                <ToolBtn active={tool === 'eraser'} onClick={() => chooseTool('eraser')} icon={<EraseIco />} label="Ластик" />
+                <ToolBtn active={tool === 'pick'} onClick={() => chooseTool('pick')} icon={<PickIco />} label="Пипетка" />
               </div>
 
               {brushTool && (
@@ -541,6 +564,7 @@ const istroke = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, stroke
 const FillIco = () => <svg width="18" height="18" viewBox="0 0 24 24" {...istroke}><path d="M5 12l6-6 7 7-6 6a2 2 0 0 1-3 0l-4-4a2 2 0 0 1 0-3Z" /><path d="M11 6 9 4" /><path d="M19 15s2 2.5 2 4a2 2 0 1 1-4 0c0-1.5 2-4 2-4Z" /></svg>
 const BrushIco = () => <svg width="18" height="18" viewBox="0 0 24 24" {...istroke}><path d="M14 4l6 6-9 9H5v-6l9-9Z" /><path d="M13 7l4 4" /></svg>
 const EraseIco = () => <svg width="18" height="18" viewBox="0 0 24 24" {...istroke}><path d="M4 15l7-7 6 6-5 5H7l-3-3a1.5 1.5 0 0 1 0-1Z" /><path d="M9 20h11" /></svg>
+const PickIco = () => <svg width="18" height="18" viewBox="0 0 24 24" {...istroke}><path d="M19.5 4.5a2.1 2.1 0 0 0-3 0L14 7l3 3 2.5-2.5a2.1 2.1 0 0 0 0-3Z" /><path d="M14 7l-8 8-1.5 4.5L9 18l8-8" /></svg>
 
 function ShapeIco({ shape }) {
   const p = { fill: 'currentColor' }
