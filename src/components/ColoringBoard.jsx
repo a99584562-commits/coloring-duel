@@ -54,6 +54,8 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const [brushSize, setBrushSize] = useState(10) // diameter in px (1 = single pixel)
   const [selected, setSelected] = useState(PALETTE[10])
   const [lastHex, setLastHex] = useState(packedToHex(PALETTE[10]))
+  const [recolorMode, setRecolorMode] = useState(false) // "замена цвета": pick a painted detail, then live-recolor that colour
+  const [editTarget, setEditTarget] = useState(null)     // packed colour currently being recoloured
   const [filled, setFilled] = useState(0)
   const [peeking, setPeeking] = useState(false)
   const [done, setDone] = useState(false)
@@ -219,6 +221,11 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
     }
     if (peekRef.current || e.button !== 0) return
     const { x, y } = canvasXY(e)
+    if (recolorMode) {
+      const t = logicalColorAt(x, y)
+      if (t != null) { setEditTarget(t); setSelected(t); setLastHex(packedToHex(t)) }
+      return
+    }
     if (tool === 'pick') { sampleColorAt(x, y); return }
     try { containerRef.current.setPointerCapture(e.pointerId) } catch { /* ignore */ }
     paintingRef.current = true
@@ -286,6 +293,14 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
       paintPixels(workingRef.current, page, colorsRef.current, brushRef.current, page.regionPixels[op.region])
       if (!peekRef.current) ctxRef.current.putImageData(workingRef.current, 0, 0)
       countFilled()
+    } else if (op.t === 'recolor') {
+      const colors = colorsRef.current, brush = brushRef.current
+      for (const r of op.regions) colors[r] = op.prev
+      for (const p of op.pixels) brush[p] = op.prev
+      for (const r of op.regions) paintPixels(workingRef.current, page, colors, brush, page.regionPixels[r])
+      if (op.pixels.length) paintPixels(workingRef.current, page, colors, brush, op.pixels)
+      if (!peekRef.current) ctxRef.current.putImageData(workingRef.current, 0, 0)
+      countFilled()
     } else {
       const brush = brushRef.current
       const px = []
@@ -318,6 +333,8 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   }
 
   function pickColor(packed) {
+    // in recolor mode, choosing a colour live-recolours the targeted detail
+    if (recolorMode && editTarget != null) { recolorTo(packed); return }
     setSelected(packed)
     setLastHex(packedToHex(packed))
     // eyedropper is one-shot → go back to painting; eraser → switch to brush
@@ -339,6 +356,39 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   function setSize(v) {
     if (Number.isNaN(v)) return
     setBrushSize(Math.max(1, Math.min(120, Math.round(v))))
+  }
+
+  // logical (un-inked) colour of a pixel: brush layer wins over region fill
+  function logicalColorAt(x, y) {
+    const p = y * page.width + x
+    const b = brushRef.current[p]
+    if (b >= 0) return b
+    if (b === BRUSH_ERASE) return null
+    const r = page.regionMap[p]
+    const c = r >= 0 ? colorsRef.current[r] : -1
+    return c >= 0 ? c : null
+  }
+
+  // replace every occurrence of the edit-target colour with newColor (live)
+  function recolorTo(newColor) {
+    if (editTarget == null) return
+    if (editTarget !== newColor) {
+      const colors = colorsRef.current, brush = brushRef.current
+      const regions = [], pixels = []
+      for (let r = 0; r < colors.length; r++) if (colors[r] === editTarget) { colors[r] = newColor; regions.push(r) }
+      for (let p = 0; p < brush.length; p++) if (brush[p] === editTarget) { brush[p] = newColor; pixels.push(p) }
+      if (regions.length || pixels.length) {
+        historyRef.current.push({ t: 'recolor', regions, pixels, prev: editTarget })
+        trimHistory()
+        for (const r of regions) paintPixels(workingRef.current, page, colors, brush, page.regionPixels[r])
+        if (pixels.length) paintPixels(workingRef.current, page, colors, brush, pixels)
+        if (!peekRef.current) ctxRef.current.putImageData(workingRef.current, 0, 0)
+        countFilled()
+      }
+    }
+    setEditTarget(newColor)
+    setSelected(newColor)
+    setLastHex(packedToHex(newColor))
   }
 
   function finish() {
@@ -381,7 +431,7 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const brushTool = tool === 'brush' || tool === 'eraser'
   const cursorScale = page.width ? (fit.w / page.width) * z : 1
   const cursorDia = Math.max(6, brushSize * cursorScale)
-  const showCursor = brushTool && hover && !grabbing && !peeking
+  const showCursor = brushTool && hover && !grabbing && !peeking && !recolorMode
 
   return (
     <div className="mx-auto min-h-[100dvh] w-full max-w-[1400px] px-4 py-6">
@@ -495,6 +545,25 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
           {/* colour */}
           <Panel>
             <div className="p-4">
+              <button
+                onClick={() => { setRecolorMode((v) => !v); setEditTarget(null) }}
+                className="mb-3 flex w-full items-center justify-between rounded-2xl bg-ink/5 px-4 py-2.5 transition-colors hover:bg-ink/10"
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold text-ink">
+                  Замена цвета
+                  {recolorMode && editTarget != null && (
+                    <span className="inline-block h-4 w-4 rounded-full ring-1 ring-black/15" style={{ background: packedToHex(editTarget) }} />
+                  )}
+                </span>
+                <Switch on={recolorMode} />
+              </button>
+              {recolorMode && (
+                <p className="mb-3 -mt-1 px-1 text-xs leading-snug text-mute">
+                  {editTarget != null
+                    ? 'Выбирайте цвета — деталь перекрашивается вживую.'
+                    : 'Кликните закрашенную деталь, чтобы взять её цвет.'}
+                </p>
+              )}
               <div className="mb-3 flex items-center gap-3">
                 <div className="h-11 w-11 rounded-2xl ring-1 ring-black/10" style={{ background: pickerHex }} />
                 <label className="group flex flex-1 cursor-pointer items-center justify-between rounded-2xl bg-ink/5 px-4 py-3 transition-colors hover:bg-ink/10">
@@ -589,6 +658,14 @@ function Stepper({ children, onClick }) {
     <button onClick={onClick} className="flex h-7 w-7 items-center justify-center rounded-lg bg-ink/5 text-base font-semibold leading-none text-ink-soft transition-colors hover:bg-ink/10">
       {children}
     </button>
+  )
+}
+
+function Switch({ on }) {
+  return (
+    <span className={`relative h-5 w-9 shrink-0 rounded-full transition-colors duration-300 ${on ? 'bg-[linear-gradient(110deg,#7c3aed,#ec4899)]' : 'bg-ink/15'}`}>
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${on ? 'left-[1.125rem]' : 'left-0.5'}`} />
+    </span>
   )
 }
 
