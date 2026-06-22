@@ -48,6 +48,8 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const peekRef = useRef(false)
   const spaceRef = useRef(false)
   const returnToolRef = useRef('fill') // tool to restore after a one-shot eyedropper pick
+  const pointersRef = useRef(new Map()) // active pointers (multi-touch)
+  const gestureRef = useRef(null)       // pinch/pan gesture state (2 fingers)
 
   const [tool, setTool] = useState('fill')
   const [shape, setShape] = useState('circle')
@@ -69,6 +71,7 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const [ty, setTy] = useState(0)
   const [grabbing, setGrabbing] = useState(false)
   const [hover, setHover] = useState(false)
+  const [coarse, setCoarse] = useState(false) // touch device → hide hover-only brush cursor
   const cursorRef = useRef(null)
 
   if (colorsRef.current === null) { colorsRef.current = new Int32Array(page.regionCount).fill(-1) }
@@ -213,7 +216,18 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
 
   function onPointerDown(e) {
     if (done) return
-    // pan with Space held or middle mouse
+    if (e.pointerType === 'touch' && !coarse) setCoarse(true)
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
+    // a second finger → pinch-zoom / two-finger pan (abort any 1-finger paint)
+    if (pointersRef.current.size === 2) {
+      cancelPaintStroke()
+      startGesture()
+      return
+    }
+    if (pointersRef.current.size > 2) return
+
+    // desktop pan: Space held or middle mouse
     if (spaceRef.current || e.button === 1) {
       panningRef.current = true
       setGrabbing(true)
@@ -242,6 +256,33 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
     }
   }
 
+  function startGesture() {
+    const pts = [...pointersRef.current.values()]
+    if (pts.length < 2) return
+    const rect = containerRef.current.getBoundingClientRect()
+    gestureRef.current = {
+      startDist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1,
+      midX: (pts[0].x + pts[1].x) / 2 - rect.left,
+      midY: (pts[0].y + pts[1].y) / 2 - rect.top,
+      startZ: z, startTx: tx, startTy: ty,
+    }
+  }
+
+  // revert an in-progress brush stroke so a stray dot doesn't appear when zooming
+  function cancelPaintStroke() {
+    if (strokeRef.current && strokeRef.current.size > 0) {
+      const brush = brushRef.current
+      const px = []
+      for (const [p, prev] of strokeRef.current) { brush[p] = prev; px.push(p) }
+      paintPixels(workingRef.current, page, colorsRef.current, brush, px)
+      if (!peekRef.current) ctxRef.current.putImageData(workingRef.current, 0, 0)
+      countFilled()
+    }
+    strokeRef.current = null
+    paintingRef.current = false
+    lastRegionRef.current = -1
+  }
+
   function positionCursor(e) {
     const el = cursorRef.current
     if (!el) return
@@ -250,7 +291,26 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   }
 
   function onPointerMove(e) {
+    if (pointersRef.current.has(e.pointerId)) pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     positionCursor(e)
+
+    // pinch-zoom + two-finger pan
+    if (gestureRef.current && pointersRef.current.size >= 2) {
+      const pts = [...pointersRef.current.values()]
+      const rect = containerRef.current.getBoundingClientRect()
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1
+      const midX = (pts[0].x + pts[1].x) / 2 - rect.left
+      const midY = (pts[0].y + pts[1].y) / 2 - rect.top
+      const g = gestureRef.current
+      const nz = clamp(g.startZ * (dist / g.startDist), 1, 9)
+      const worldX = (g.midX - g.startTx) / g.startZ
+      const worldY = (g.midY - g.startTy) / g.startZ
+      setZ(nz)
+      setTx(midX - worldX * nz)
+      setTy(midY - worldY * nz)
+      return
+    }
+
     if (panningRef.current) {
       const s = panStartRef.current
       setTx(s.tx + (e.clientX - s.x))
@@ -271,7 +331,10 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
     }
   }
 
-  function endPaint() {
+  function endPaint(e) {
+    if (e && e.pointerId != null) pointersRef.current.delete(e.pointerId)
+    if (pointersRef.current.size < 2) gestureRef.current = null
+    if (pointersRef.current.size > 0) return // other finger(s) still down
     if (paintingRef.current && strokeRef.current && strokeRef.current.size > 0) {
       historyRef.current.push({ t: 'brush', changes: strokeRef.current })
       trimHistory()
@@ -475,10 +538,10 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const brushTool = tool === 'brush' || tool === 'eraser'
   const cursorScale = page.width ? (fit.w / page.width) * z : 1
   const cursorDia = Math.max(6, brushSize * cursorScale)
-  const showCursor = brushTool && hover && !grabbing && !peeking && !recolorMode
+  const showCursor = brushTool && hover && !grabbing && !peeking && !recolorMode && !coarse
 
   return (
-    <div className="mx-auto min-h-[100dvh] w-full max-w-[1400px] px-4 py-6">
+    <div className="mx-auto min-h-[100dvh] w-full max-w-[1400px] px-3 py-4 sm:px-4 lg:py-6">
       <div className="rise mb-4 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <Eyebrow>Комната {roomCode || '—'}</Eyebrow>
@@ -491,19 +554,21 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
         <p className="hidden text-xs text-mute lg:block">
           <Kbd>G</Kbd> заливка · <Kbd>B</Kbd> кисть · <Kbd>I</Kbd> пипетка · <Kbd>E</Kbd> ластик · <Kbd>Z</Kbd> отмена · <Kbd>Пробел</Kbd> двигать
         </p>
+        <p className="text-xs text-mute lg:hidden">один палец — красить · два — зум/двигать</p>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_330px]">
+      <div className="grid gap-4 lg:grid-cols-[1fr_330px] lg:gap-5">
         <Panel className="rise">
           <div
             ref={containerRef}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={endPaint}
+            onPointerCancel={endPaint}
             onPointerEnter={() => setHover(true)}
-            onPointerLeave={() => { setHover(false); endPaint() }}
-            className="relative overflow-hidden rounded-[1.4rem] bg-[repeating-conic-gradient(#f1f1f5_0%_25%,#fafafb_0%_50%)] bg-[length:22px_22px]"
-            style={{ height: '80vh', touchAction: 'none' }}
+            onPointerLeave={(e) => { setHover(false); endPaint(e) }}
+            className="relative h-[58vh] overflow-hidden rounded-[1.4rem] bg-[repeating-conic-gradient(#f1f1f5_0%_25%,#fafafb_0%_50%)] bg-[length:22px_22px] lg:h-[80vh]"
+            style={{ touchAction: 'none' }}
           >
             <canvas
               ref={canvasRef}

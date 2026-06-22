@@ -19,7 +19,7 @@ export function Lobby({ onCreate, onJoin, error, busy, initialCode = '' }) {
         <Eyebrow>
           <Sparkle size={11} /> P2P · без сервера
         </Eyebrow>
-        <h1 className="mt-6 font-display text-5xl font-semibold leading-[0.95] tracking-tight text-ink sm:text-7xl">
+        <h1 className="mt-6 font-display text-[2rem] font-semibold leading-[1.02] tracking-tight text-ink sm:text-6xl sm:leading-[0.95] lg:text-7xl">
           Раскраска
           <span className="bg-[linear-gradient(110deg,#7c3aed,#ec4899)] bg-clip-text text-transparent">
             -дуэль
