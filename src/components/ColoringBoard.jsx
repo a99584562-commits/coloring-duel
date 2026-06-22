@@ -56,6 +56,8 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
   const [lastHex, setLastHex] = useState(packedToHex(PALETTE[10]))
   const [recolorMode, setRecolorMode] = useState(false) // "замена цвета": pick a painted detail, then live-recolor that colour
   const [editTarget, setEditTarget] = useState(null)     // packed colour currently being recoloured
+  const [recolorScope, setRecolorScope] = useState('all') // 'all' = every pixel of that colour, 'detail' = only the clicked detail
+  const editDetailRef = useRef(null)                      // {regions:[], pixels:[]} captured on click for 'detail' scope
   const [filled, setFilled] = useState(0)
   const [peeking, setPeeking] = useState(false)
   const [done, setDone] = useState(false)
@@ -223,7 +225,7 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
     const { x, y } = canvasXY(e)
     if (recolorMode) {
       const t = logicalColorAt(x, y)
-      if (t != null) { setEditTarget(t); setSelected(t); setLastHex(packedToHex(t)) }
+      if (t != null) { captureDetail(x, y); setEditTarget(t); setSelected(t); setLastHex(packedToHex(t)) }
       return
     }
     if (tool === 'pick') { sampleColorAt(x, y); return }
@@ -369,14 +371,56 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
     return c >= 0 ? c : null
   }
 
+  // connected run of brush pixels of one colour (for "only this detail" scope)
+  function floodBrush(start, color) {
+    const w = page.width, h = page.height
+    const brush = brushRef.current
+    if (brush[start] !== color) return []
+    const seen = new Uint8Array(w * h)
+    const stack = [start]
+    seen[start] = 1
+    const out = []
+    while (stack.length) {
+      const q = stack.pop()
+      out.push(q)
+      const x = q % w, y = (q / w) | 0
+      if (x > 0 && !seen[q - 1] && brush[q - 1] === color) { seen[q - 1] = 1; stack.push(q - 1) }
+      if (x < w - 1 && !seen[q + 1] && brush[q + 1] === color) { seen[q + 1] = 1; stack.push(q + 1) }
+      if (y > 0 && !seen[q - w] && brush[q - w] === color) { seen[q - w] = 1; stack.push(q - w) }
+      if (y < h - 1 && !seen[q + w] && brush[q + w] === color) { seen[q + w] = 1; stack.push(q + w) }
+    }
+    return out
+  }
+
+  // capture the clicked detail (a region fill, or a connected brush blob)
+  function captureDetail(x, y) {
+    const p = y * page.width + x
+    if (brushRef.current[p] >= 0) {
+      editDetailRef.current = { regions: [], pixels: floodBrush(p, brushRef.current[p]) }
+    } else {
+      const r = page.regionMap[p]
+      editDetailRef.current = { regions: r >= 0 && colorsRef.current[r] >= 0 ? [r] : [], pixels: [] }
+    }
+  }
+
   // replace every occurrence of the edit-target colour with newColor (live)
   function recolorTo(newColor) {
     if (editTarget == null) return
     if (editTarget !== newColor) {
       const colors = colorsRef.current, brush = brushRef.current
-      const regions = [], pixels = []
-      for (let r = 0; r < colors.length; r++) if (colors[r] === editTarget) { colors[r] = newColor; regions.push(r) }
-      for (let p = 0; p < brush.length; p++) if (brush[p] === editTarget) { brush[p] = newColor; pixels.push(p) }
+      let regions = [], pixels = []
+      if (recolorScope === 'detail') {
+        const det = editDetailRef.current
+        if (det) {
+          regions = det.regions.filter((r) => colors[r] === editTarget)
+          pixels = det.pixels.filter((p) => brush[p] === editTarget)
+        }
+      } else {
+        for (let r = 0; r < colors.length; r++) if (colors[r] === editTarget) regions.push(r)
+        for (let p = 0; p < brush.length; p++) if (brush[p] === editTarget) pixels.push(p)
+      }
+      for (const r of regions) colors[r] = newColor
+      for (const p of pixels) brush[p] = newColor
       if (regions.length || pixels.length) {
         historyRef.current.push({ t: 'recolor', regions, pixels, prev: editTarget })
         trimHistory()
@@ -558,11 +602,27 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
                 <Switch on={recolorMode} />
               </button>
               {recolorMode && (
-                <p className="mb-3 -mt-1 px-1 text-xs leading-snug text-mute">
-                  {editTarget != null
-                    ? 'Выбирайте цвета — деталь перекрашивается вживую.'
-                    : 'Кликните закрашенную деталь, чтобы взять её цвет.'}
-                </p>
+                <div className="mb-3 -mt-1">
+                  <div className="mb-2 grid grid-cols-2 gap-1 rounded-xl bg-ink/5 p-1">
+                    <button
+                      onClick={() => setRecolorScope('all')}
+                      className={`rounded-lg py-1.5 text-xs font-semibold transition-colors ${recolorScope === 'all' ? 'bg-white text-ink shadow-sm' : 'text-ink-soft hover:text-ink'}`}
+                    >
+                      Всё этого цвета
+                    </button>
+                    <button
+                      onClick={() => setRecolorScope('detail')}
+                      className={`rounded-lg py-1.5 text-xs font-semibold transition-colors ${recolorScope === 'detail' ? 'bg-white text-ink shadow-sm' : 'text-ink-soft hover:text-ink'}`}
+                    >
+                      Только деталь
+                    </button>
+                  </div>
+                  <p className="px-1 text-xs leading-snug text-mute">
+                    {editTarget != null
+                      ? (recolorScope === 'detail' ? 'Меняется только выбранная деталь.' : 'Меняются все участки этого цвета.')
+                      : 'Кликните закрашенную деталь на картинке.'}
+                  </p>
+                </div>
               )}
               <div className="mb-3 flex items-center gap-3">
                 <div className="h-11 w-11 rounded-2xl ring-1 ring-black/10" style={{ background: pickerHex }} />
