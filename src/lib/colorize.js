@@ -19,7 +19,7 @@ export function loadImage(src) {
   })
 }
 
-export function downscaleToImageData(img, maxDim = 820) {
+export function downscaleToImageData(img, maxDim = 1280) {
   const ratio = Math.min(1, maxDim / Math.max(img.width, img.height))
   const w = Math.max(1, Math.round(img.width * ratio))
   const h = Math.max(1, Math.round(img.height * ratio))
