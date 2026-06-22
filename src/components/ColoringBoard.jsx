@@ -89,16 +89,21 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
     ctx.putImageData(workingRef.current, 0, 0)
   }, [page])
 
-  // fit-to-container + recompute on resize
+  // fit-to-container; centre once, then preserve zoom/pan across resizes
+  // (mobile address-bar show/hide resizes the container — must NOT reset zoom)
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
+    let inited = false
     const compute = () => {
       const cw = el.clientWidth, ch = el.clientHeight
       const s = Math.min(cw / page.width, ch / page.height)
       const fw = page.width * s, fh = page.height * s
       setFit({ w: fw, h: fh })
-      setZ(1); setTx((cw - fw) / 2); setTy((ch - fh) / 2)
+      if (!inited) {
+        inited = true
+        setZ(1); setTx((cw - fw) / 2); setTy((ch - fh) / 2)
+      }
     }
     compute()
     const ro = new ResizeObserver(compute)
@@ -216,7 +221,8 @@ export function ColoringBoard({ page, roomCode, partnerDone, onDone }) {
 
   function onPointerDown(e) {
     if (done) return
-    if (e.pointerType === 'touch' && !coarse) setCoarse(true)
+    if (e.pointerType === 'touch') { if (!coarse) setCoarse(true) }
+    else if (coarse) setCoarse(false)
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
 
     // a second finger → pinch-zoom / two-finger pan (abort any 1-finger paint)
